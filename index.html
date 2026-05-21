@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Motion Viewer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+        canvas { display: block; }
+
+        #ui {
+            position: fixed; bottom: 28px; left: 50%;
+            transform: translateX(-50%);
+            display: flex; gap: 14px; align-items: center;
+            z-index: 10;
+            background: rgba(10,18,8,0.7);
+            border: 1px solid rgba(180,220,120,0.12);
+            border-radius: 40px;
+            padding: 10px 24px;
+            backdrop-filter: blur(12px);
+        }
+        #ui button {
+            background: none;
+            border: 1px solid rgba(180,220,120,0.2);
+            color: rgba(200,230,160,0.6);
+            border-radius: 20px; padding: 5px 16px;
+            font-family: 'Courier New', monospace;
+            font-size: 10px; letter-spacing: 0.12em;
+            cursor: pointer; transition: all 0.3s; text-transform: uppercase;
+        }
+        #ui button:hover { background: rgba(180,220,120,0.08); color: rgba(220,245,180,0.9); }
+        #ui button.active { background: rgba(180,220,120,0.12); color: #d8f0a0; border-color: rgba(180,220,120,0.4); }
+        .lbl { color: rgba(180,220,120,0.3); font-size: 9px; letter-spacing: 0.13em; text-transform: uppercase; white-space: nowrap; }
+        input[type=range] {
+            -webkit-appearance: none; height: 1px;
+            background: rgba(180,220,120,0.2); outline: none; border-radius: 1px;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 9px; height: 9px;
+            border-radius: 50%; background: rgba(200,240,140,0.8); cursor: pointer;
+        }
+
+        #title-card {
+            position: fixed; top: 28px; left: 36px;
+            pointer-events: none;
+        }
+        #title-main {
+            color: rgba(210,240,160,0.18);
+            font-size: 11px; letter-spacing: 0.3em; text-transform: uppercase;
+            line-height: 1;
+        }
+        #title-sub {
+            color: rgba(210,240,160,0.08);
+            font-size: 8px; letter-spacing: 0.2em; text-transform: uppercase;
+            margin-top: 6px; line-height: 2;
+        }
+
+        #load-overlay {
+            position: fixed; inset: 0;
+            background: #000;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 24px;
+            z-index: 100; transition: opacity 1.2s;
+        }
+        #load-overlay.hidden { opacity: 0; pointer-events: none; }
+        #load-bar-wrap { width: 220px; height: 1px; background: rgba(180,220,120,0.08); border-radius: 1px; overflow: hidden; }
+        #load-bar { height: 100%; background: rgba(200,240,140,0.5); width: 0%; transition: width 0.3s; }
+        #load-status { color: rgba(180,220,120,0.28); font-size: 9px; letter-spacing: 0.15em; text-transform: uppercase; min-height: 14px; }
+    </style>
+</head>
+<body>
+
+<div id="load-overlay">
+  <div id="load-bar-wrap"><div id="load-bar"></div></div>
+  <div id="load-status">Loading…</div>
+</div>
+
+<div id="title-card">
+  <div id="title-main">Motion Viewer</div>
+  <div id="title-sub">Interactive 3D</div>
+</div>
+
+<div id="ui">
+  <button id="btn-play" class="active" onclick="togglePlay()">Pause</button>
+  <button onclick="resetGrowth()">Shed</button>
+  <button id="btn-mode" class="active" onclick="toggleEffectMode()">Ribbons</button>
+  <button id="btn-quality" onclick="toggleQuality()">Low</button>
+  <button onclick="recenterStage()">Recenter</button>
+  <span class="lbl">Speed</span>
+  <input type="range" id="speed" min="0.02" max="1.5" step="0.02" value="0.35" style="width:60px"/>
+  <span class="lbl">Growth</span>
+  <input type="range" id="intensity" min="1" max="100" step="1" value="10" style="width:60px"/>
+  <span class="lbl">Memory</span>
+  <input type="range" id="trail" min="1" max="100" step="1" value="15" style="width:60px"/>
+  <button onclick="toggleBody()">Body</button>
+</div>
+
+<script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+</script>
+<script type="module">
+    import * as THREE from 'three';
+    import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const loadOverlay = document.getElementById('load-overlay');
+    const loadBar = document.getElementById('load-bar');
+    const loadStatus = document.getElementById('load-status');
+
+    // Scene setup
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
+    const renderer = new THREE.WebGLRenderer();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // Lighting
+    const light = new THREE.DirectionalLight(0xffffff, 1);
+    light.position.set(0, 1, 1);
+    scene.add(light);
+    scene.add(new THREE.AmbientLight(0x404040));
+
+    // Camera position — will be corrected once model loads
+    camera.position.set(0, 100, 300);
+
+    // Mouse controls — rotate, pan, zoom
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 100, 0); // temporary — overridden on load
+    controls.update();
+
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
+    const stagePlane = new THREE.Mesh(
+        new THREE.PlaneGeometry(1200, 1200),
+        new THREE.MeshBasicMaterial({ visible: false })
+    );
+    stagePlane.rotation.x = -Math.PI / 2;
+    stagePlane.position.y = 0;
+    scene.add(stagePlane);
+
+    renderer.domElement.addEventListener('dblclick', onDoubleClick);
+
+    function onDoubleClick(event) {
+        if (!modelObject) return;
+        recenterModel();
+    }
+
+    function getModelCenter() {
+        // Only use SkinnedMesh — excludes skeleton line geometry baked into FBX
+        const box = new THREE.Box3();
+        let found = false;
+        modelObject.updateMatrixWorld(true);
+        modelObject.traverse((child) => {
+            if (child.isSkinnedMesh) {
+                box.expandByObject(child);
+                found = true;
+            }
+        });
+        // Fallback to all meshes if no SkinnedMesh found
+        if (!found) {
+            modelObject.traverse((child) => {
+                if (child.isMesh) box.expandByObject(child);
+            });
+        }
+        return box;
+    }
+
+    function recenterModel() {
+        if (!modelObject) return;
+        const box = getModelCenter();
+        if (box.isEmpty()) return;
+
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const fov = camera.fov * (Math.PI / 180);
+        const distance = (maxDim / (2 * Math.tan(fov / 2))) * 1.8;
+
+        // Snap orbit target and camera to body center
+        controls.target.copy(center);
+        camera.position.set(center.x, center.y, center.z + distance);
+        controls.update();
+    }
+
+    // Debug helpers
+    renderer.setClearColor(0x111111);
+    const grid = new THREE.GridHelper(500, 20, 0xffffff, 0xffffff);
+    grid.material.opacity = 0.08;
+    grid.material.transparent = true;
+    grid.visible = false;
+    scene.add(grid);
+
+    // axis helper removed
+
+    let mixer = null;
+    let action = null;
+    const clock = new THREE.Clock();
+
+    // Control variables
+    let modelObject = null;
+    let animationSpeed = 0.35;
+    let particleEmissionRate = 0.1;  // very faint at start
+    let particleLifetime = 1.0;      // fades in ~1 second at start
+    let bodyVisible = true;
+    let effectMode = 'ribbon';
+    let lowQuality = false;
+    let animationPaused = false;
+
+    // Particle system
+    const particleCount = 10000;
+    const particleGeometry = new THREE.BufferGeometry();
+    const particlePositions = new Float32Array(particleCount * 3);
+    const particleColors = new Float32Array(particleCount * 3);
+    const particleAlphas = new Float32Array(particleCount);
+    const particleVelocities = new Float32Array(particleCount * 3);
+    particleGeometry.setAttribute('position', new THREE.BufferAttribute(particlePositions, 3));
+    particleGeometry.setAttribute('color', new THREE.BufferAttribute(particleColors, 3));
+    particleGeometry.setAttribute('alpha', new THREE.BufferAttribute(particleAlphas, 1));
+    const particleMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+            size: { value: 10.0 },
+            shape: { value: 0.0 }
+        },
+        vertexShader: `
+            uniform float size;
+            attribute vec3 color;
+            attribute float alpha;
+            varying float vAlpha;
+            varying vec3 vColor;
+            void main() {
+                vAlpha = alpha;
+                vColor = color;
+                vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                gl_PointSize = size * (300.0 / -mvPosition.z);
+                gl_Position = projectionMatrix * mvPosition;
+            }
+        `,
+        fragmentShader: `
+            uniform float shape;
+            varying float vAlpha;
+            varying vec3 vColor;
+            void main() {
+                vec2 uv = gl_PointCoord - vec2(0.5);
+                float mask;
+                if (shape > 0.5) {
+                    // Narrow elongated oval — leaf shape
+                    // Compress x strongly, stretch y for teardrop feel
+                    vec2 stretched = vec2(uv.x * 4.0, uv.y * 1.2);
+                    float dist = length(stretched);
+                    // Taper the ends by adding x contribution
+                    dist += abs(uv.x) * 0.5;
+                    mask = 1.0 - smoothstep(0.38, 0.5, dist);
+                } else {
+                    // Clean soft circle — ribbon
+                    float dist = length(uv);
+                    mask = 1.0 - smoothstep(0.38, 0.5, dist);
+                }
+                gl_FragColor = vec4(vColor, vAlpha * mask);
+            }
+        `,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        depthTest: true
+    });
+    const particles = new THREE.Points(particleGeometry, particleMaterial);
+    scene.add(particles);
+
+    let particleIndex = 0;
+    const particleLifetimes = new Array(particleCount).fill(0);
+    let bones = [];
+    let particleDebugLogged = false;
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const delta = clock.getDelta();
+        if (mixer) mixer.update(delta * animationSpeed);
+        controls.update();
+        renderer.render(scene, camera);
+
+        if (bones.length > 0) {
+            if (!particleDebugLogged) {
+                console.log('Particle emission active: bones=', bones.length, 'emitRate=', particleEmissionRate);
+                particleDebugLogged = true;
+            }
+            const step = lowQuality ? 3 : 1;
+            const emitCount = Math.round(particleEmissionRate);
+            for (let e = 0; e < emitCount; e++) {
+                for (let bi = 0; bi < bones.length; bi += step) {
+                    const bone = bones[bi];
+                    const pos = new THREE.Vector3();
+                    bone.getWorldPosition(pos);
+                    const drift = effectMode === 'leaf' ? 20 : 6;
+                    const upStrength = effectMode === 'leaf' ? 18 : 4;
+                    particlePositions[particleIndex * 3]     = pos.x + (Math.random() - 0.5) * 8;
+                    particlePositions[particleIndex * 3 + 1] = pos.y + (Math.random() - 0.5) * 6;
+                    particlePositions[particleIndex * 3 + 2] = pos.z + (Math.random() - 0.5) * 8;
+                    particleVelocities[particleIndex * 3]     = (Math.random() - 0.5) * drift;
+                    particleVelocities[particleIndex * 3 + 1] = Math.random() * upStrength;
+                    particleVelocities[particleIndex * 3 + 2] = (Math.random() - 0.5) * drift;
+                    if (effectMode === 'leaf') {
+                        particleColors[particleIndex * 3]     = 0.196;
+                        particleColors[particleIndex * 3 + 1] = 0.8039;
+                        particleColors[particleIndex * 3 + 2] = 0.196;
+                    } else {
+                        particleColors[particleIndex * 3]     = 0.780;
+                        particleColors[particleIndex * 3 + 1] = 0.082;
+                        particleColors[particleIndex * 3 + 2] = 0.522;
+                    }
+                    particleAlphas[particleIndex] = 1.0;
+                    particleLifetimes[particleIndex] = effectMode === 'leaf' ? particleLifetime * 1.4 : particleLifetime;
+                    particleIndex = (particleIndex + 1) % particleCount;
+                }
+            }
+        }
+
+        for (let i = 0; i < particleCount; i++) {
+            if (particleLifetimes[i] > 0) {
+                particleLifetimes[i] -= delta;
+                particleAlphas[i] = Math.min(1.0, Math.max(0, particleLifetimes[i] / particleLifetime));
+                particlePositions[i * 3]     += particleVelocities[i * 3] * delta;
+                particlePositions[i * 3 + 1] += particleVelocities[i * 3 + 1] * delta;
+                particlePositions[i * 3 + 2] += particleVelocities[i * 3 + 2] * delta;
+            }
+        }
+
+        particleGeometry.attributes.position.needsUpdate = true;
+        particleGeometry.attributes.color.needsUpdate = true;
+        particleGeometry.attributes.alpha.needsUpdate = true;
+    }
+    animate();
+
+    // ── Load FBX from Google Drive via FBXLoader ─────────────────────────────
+    function loadModel() {
+        loadStatus.textContent = 'Fetching model…';
+        loadBar.style.width = '20%';
+
+        // Dropbox direct download URL
+        const url = 'https://dl.dropboxusercontent.com/scl/fi/iu3gtxpkaletjo97q5k47/daphne.fbx?rlkey=ym4f5b99ztgx8tg3429lfdj0h&st=ciu2hew2&dl=1';
+
+        const loader = new FBXLoader();
+
+        loader.load(url, function(object) {
+                loadBar.style.width = '70%';
+                loadStatus.textContent = 'Building scene…';
+
+                modelObject = object;
+                bones = [];
+
+                object.traverse((child) => {
+                    if (child.isSkinnedMesh) {
+                        const material = new THREE.MeshStandardMaterial({
+                            color: 0xffd700,
+                            metalness: 0.6,
+                            roughness: 0.4,
+                            emissive: 0xaa7700,
+                            emissiveIntensity: 0.4,
+                        });
+                        if ('skinning' in material) material.skinning = true;
+                        child.material = material;
+                        child.material.needsUpdate = true;
+                        if (child.skeleton) {
+                            bones.push(...child.skeleton.bones);
+                        }
+                    } else if (child.isMesh) {
+                        child.material = new THREE.MeshStandardMaterial({
+                            color: 0xffd700,
+                            metalness: 0.3,
+                            roughness: 1.0
+                        });
+                        child.material.needsUpdate = true;
+                    }
+                    if (child.isBone) {
+                        bones.push(child);
+                    }
+                });
+
+                bones = bones.filter(Boolean);
+                console.log('Bones found for particle emission:', bones.length);
+
+                // Hide skeleton visualization — bones are only needed for particle emission
+                // SkeletonHelper draws the bone lines; disable it entirely
+                object.traverse((child) => {
+                    if (child.isSkeletonHelper) {
+                        child.visible = false;
+                    }
+                    // Also hide any bone objects from rendering
+                    if (child.isBone) {
+                        child.visible = false;
+                    }
+                });
+
+                scene.add(object);
+
+                // Aim camera at model on load using SkinnedMesh only
+                recenterModel();
+
+                if (object.animations && object.animations.length > 0) {
+                    mixer = new THREE.AnimationMixer(object);
+                    action = mixer.clipAction(object.animations[0]);
+                    action.play();
+                }
+
+                loadBar.style.width = '100%';
+                loadStatus.textContent = 'Ready';
+                setTimeout(() => loadOverlay.classList.add('hidden'), 600);
+
+            }, function(xhr) {
+                if (xhr.lengthComputable) {
+                    const percent = (xhr.loaded / xhr.total) * 100;
+                    loadBar.style.width = Math.max(20, percent * 0.8) + '%';
+                    loadStatus.textContent = 'Loading: ' + percent.toFixed(1) + '%';
+                }
+            }, function(error) {
+                console.error('Load error:', error);
+                loadStatus.textContent = 'Error loading file — check console';
+                loadBar.style.width = '0%';
+            });
+    }
+
+    // Start loading immediately when the page opens
+    loadModel();
+
+    // Keyboard shortcut
+    window.addEventListener('keydown', (event) => {
+        if (event.key === 'p' || event.key === 'P') togglePlay();
+    });
+
+    // UI functions
+    window.togglePlay = function() {
+        const btn = document.getElementById('btn-play');
+        if (action) {
+            animationPaused = !animationPaused;
+            if (animationPaused) {
+                action.paused = true;
+                action.timeScale = 0;
+                btn.textContent = 'Play';
+                btn.classList.remove('active');
+            } else {
+                action.paused = false;
+                action.timeScale = 1;
+                action.play();
+                btn.textContent = 'Pause';
+                btn.classList.add('active');
+            }
+        }
+    };
+
+    window.resetGrowth = function() {
+        particleIndex = 0;
+        particleLifetimes.fill(0);
+        particleAlphas.fill(0);
+    };
+
+    window.toggleBody = function() {
+        if (modelObject) {
+            bodyVisible = !bodyVisible;
+            modelObject.visible = bodyVisible;
+        }
+    };
+
+    window.toggleEffectMode = function() {
+        const btn = document.getElementById('btn-mode');
+        if (effectMode === 'ribbon') {
+            effectMode = 'leaf';
+            particleMaterial.uniforms.size.value = 18.0;
+            particleMaterial.uniforms.shape.value = 1.0;
+            btn.textContent = 'Leaves';
+            btn.classList.add('active');
+        } else {
+            effectMode = 'ribbon';
+            particleMaterial.uniforms.size.value = 5.0;
+            particleMaterial.uniforms.shape.value = 0.0;
+            btn.textContent = 'Ribbons';
+            btn.classList.remove('active');
+        }
+    };
+
+    window.toggleQuality = function() {
+        const btn = document.getElementById('btn-quality');
+        lowQuality = !lowQuality;
+        btn.textContent = lowQuality ? 'High' : 'Low';
+        btn.classList.toggle('active', lowQuality);
+    };
+
+    window.recenterStage = function() {
+        recenterModel();
+    };
+
+    document.getElementById('speed').addEventListener('input', (e) => {
+        animationSpeed = parseFloat(e.target.value) * 5;
+    });
+    document.getElementById('intensity').addEventListener('input', (e) => {
+        // Exponential scale: slider 1-100 maps to emission 0.05-8
+        const t = parseFloat(e.target.value) / 100;
+        particleEmissionRate = 0.05 * Math.pow(160, t);
+    });
+    document.getElementById('trail').addEventListener('input', (e) => {
+        // Linear scale: slider 1-100 maps to lifetime 0.5-15 seconds
+        const t = parseFloat(e.target.value) / 100;
+        particleLifetime = 0.5 + t * 14.5;
+        particleLifetimes.fill(0);
+        particleAlphas.fill(0);
+    });
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+</script>
+</body>
+</html>
